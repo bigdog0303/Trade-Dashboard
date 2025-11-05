@@ -23,9 +23,8 @@
   th,td{border-bottom:1px solid var(--line);padding:8px 6px;text-align:left;font-size:.92rem}
   th{font-weight:700}
   .empty{padding:12px;border:1px dashed var(--line);border-radius:12px;color:var(--muted)}
-  .ok{color:#22c55e}.bad{color:#ef4444}.be{color:#a3a3a3}
+  .ok{color:#22c55e}.bad{color:#ef4444}
   canvas{width:100%;max-width:100%;height:240px}
-  .diag{margin-top:6px;color:var(--muted);font-size:.85rem}
 </style>
 </head>
 <body>
@@ -37,7 +36,7 @@
 
   <div class="grid">
     <div class="card"><div class="k">Total Trades</div><div class="v" id="k-total">–</div></div>
-    <div class="card"><div class="k">Win Rate (ex-B/E)</div><div class="v" id="k-winrate">–</div></div>
+    <div class="card"><div class="k">Win Rate</div><div class="v" id="k-winrate">–</div></div>
     <div class="card"><div class="k">Avg R</div><div class="v" id="k-avgR">–</div></div>
     <div class="card"><div class="k">Net R</div><div class="v" id="k-netR">–</div></div>
   </div>
@@ -45,7 +44,7 @@
   <div class="card">
     <div class="k">Equity Curve (R)</div>
     <canvas id="eq"></canvas>
-    <div class="diag" id="note"></div>
+    <div class="muted" id="note"></div>
   </div>
 
   <div class="card">
@@ -55,18 +54,13 @@
 
   <div id="empty" class="empty" style="display:none">
     Add a <code>data.csv</code> with headers including at least <code>Date, Result, R</code>.
-    Rows with “No Trade” or “No Setup” are ignored.
+    Only rows where Result is exactly <strong>Win</strong> or <strong>Loss</strong> are counted.
   </div>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
-/* ===== CONFIG ===== */
-const CFG = {
-  includeBreakEvenInTotal: true,   // set false to exclude B/E from Total Trades
-};
-/* ================== */
-
+/* ---------- Strict CSV parsing + strict counting ---------- */
 function parseCSV(text){
   const lines = text.replace(/\r/g,'').trim().split('\n');
   const rows = lines.map(line=>{
@@ -82,14 +76,15 @@ function parseCSV(text){
   });
   if(!rows.length) return [];
 
+  // headers (case-insensitive)
   const header = rows[0].map(h=>h.trim().toLowerCase());
-  const idx = Object.fromEntries(header.map((h,i)=>[h,i]));
-  const col = names => { for (const n of names) if (idx[n] != null) return idx[n]; return -1; };
+  const getIdx = name => header.indexOf(name);
 
-  const iDate   = col(['date']);
-  const iResult = col(['result','outcome']);
-  const iR      = col(['r','rr','net r','netr']);
-  const iFilter = col(['filter']);  // optional
+  const iDate   = getIdx('date');
+  const iResult = getIdx('result');
+  const iR      = getIdx('r');
+
+  if (iDate < 0 || iResult < 0 || iR < 0) return [];
 
   function parseDateFlexible(s){
     if(!s) return null;
@@ -112,43 +107,41 @@ function parseCSV(text){
     const d = new Date(t);
     return isNaN(d) ? null : d;
   }
+
   const cleanNum = x => {
     if (x==null) return NaN;
     return parseFloat(String(x).replace(/[−–—]/g,'-').replace(',','.'));
   };
 
-  // Parse every row
-  return rows.slice(1).map(r=>{
-    const dateStr   = iDate>=0   ? r[iDate]   : '';
-    const dateObj   = parseDateFlexible(dateStr);
-    const resultRaw = (iResult>=0 ? r[iResult] : '').toLowerCase().trim();
-    const filterRaw = (iFilter>=0 ? r[iFilter] : '').toLowerCase().trim();
-    const R         = cleanNum(iR>=0 ? r[iR] : '');
-    return { dateStr, dateObj, resultRaw, filterRaw, R };
+  // Build records
+  const data = rows.slice(1).map(r=>{
+    const dateStr = r[iDate] ?? '';
+    const dateObj = parseDateFlexible(dateStr);
+    const resultRaw = (r[iResult] ?? '').trim();
+    const resultLC  = resultRaw.toLowerCase();
+    const R = cleanNum(r[iR]);
+
+    return { dateStr, dateObj, resultRaw, resultLC, R };
   });
-}
 
-function classify(row){
-  // skip if date invalid
-  if(!(row.dateObj instanceof Date) || isNaN(row.dateObj)) return 'skip';
-  // skip explicit non-trade rows
-  if(/no\s*trade/.test(row.resultRaw)) return 'skip';
-  if(/no\s*set\s*up|no\s*setup|no\s*trade/.test(row.filterRaw)) return 'skip';
+  // STRICT: Count only exact Win/Loss results (allow optional rating prefix like "3 Win")
+  const isWin  = s => /^\s*(\d+\s*)?win\s*$/i.test(s);
+  const isLoss = s => /^\s*(\d+\s*)?loss\s*$/i.test(s);
 
-  // outcome from text first (handles "3 win"/"3 loss")
-  if(/win/.test(row.resultRaw))  return 'win';
-  if(/loss|lose/.test(row.resultRaw)) return 'loss';
-  if(/break[-\s]?even|^be$|^b\/?e$/.test(row.resultRaw)) return 'be';
+  const trades = data.filter(row => {
+    if(!(row.dateObj instanceof Date) || isNaN(row.dateObj)) return false;
+    return isWin(row.resultRaw) || isLoss(row.resultRaw);
+  });
 
-  // fallback to R sign
-  if(Number.isFinite(row.R)){
-    if(row.R > 0) return 'win';
-    if(row.R < 0) return 'loss';
-    return 'be';
-  }
-  // still a trade (unknown outcome) -> treat as BE for counting, R=0 for metrics
-  row.R = 0;
-  return 'be';
+  // classify
+  trades.forEach(t=>{
+    t.cls = isWin(t.resultRaw) ? 'win' : 'loss';
+  });
+
+  // sort by date
+  trades.sort((a,b)=> a.dateObj - b.dateObj);
+
+  return trades;
 }
 
 async function load(){
@@ -165,41 +158,31 @@ async function load(){
     return;
   }
 
-  const parsed = parseCSV(csv);
-  if(!parsed.length){
+  const trades = parseCSV(csv);
+  if(!trades.length){
     document.getElementById('empty').style.display='';
     document.getElementById('updated').textContent='Updated: '+new Date().toLocaleString();
     return;
   }
 
-  // classify & keep trades (not skips)
-  const trades = parsed.map(r => ({...r, cls: classify(r)}))
-                       .filter(r => r.cls !== 'skip')
-                       .sort((a,b)=> a.dateObj - b.dateObj);
-
-  // metrics
+  // Metrics (strict)
   const wins   = trades.filter(t=>t.cls==='win').length;
   const losses = trades.filter(t=>t.cls==='loss').length;
-  const bes    = trades.filter(t=>t.cls==='be').length;
+  const total  = wins + losses;
 
   const netR = trades.reduce((s,t)=> s + (Number.isFinite(t.R)? t.R : 0), 0);
-  const avgR = trades.length ? (netR / trades.length) : 0;
-
-  const wrDenom = wins + losses;                         // exclude B/E for WR
-  const winrate = wrDenom ? (wins / wrDenom * 100) : 0;
-  const totalTrades = CFG.includeBreakEvenInTotal ? (wins + losses + bes)
-                                                  : (wins + losses);
+  const avgR = total ? (netR / total) : 0;
+  const winrate = total ? (wins / total * 100) : 0;
 
   // KPIs
-  document.getElementById('k-total').textContent   = totalTrades;
+  document.getElementById('k-total').textContent   = total;
   document.getElementById('k-winrate').textContent = winrate.toFixed(1)+'%';
   document.getElementById('k-avgR').textContent    = avgR.toFixed(2);
   document.getElementById('k-netR').textContent    = netR.toFixed(2);
   document.getElementById('updated').textContent   = 'Updated: '+new Date().toLocaleString();
-  document.getElementById('note').textContent =
-    `Wins: ${wins} · Losses: ${losses} · B/E: ${bes} · Skips: “No Trade/No Setup” ignored`;
+  document.getElementById('note').textContent      = `Wins: ${wins} · Losses: ${losses}`;
 
-  // equity curve (non-numeric R treated as 0)
+  // Equity curve (only counted trades)
   let cum=0;
   const labels = trades.map(t=> t.dateStr || t.dateObj.toISOString().slice(0,10));
   const eq = trades.map(t=> (cum += (Number.isFinite(t.R)? t.R : 0)));
@@ -211,16 +194,15 @@ async function load(){
     }
   });
 
-  // latest 10 (only Date / Result / R)
+  // Latest 10
   const last = trades.slice(-10).reverse();
   const rowsHtml = last.map(t=>{
-    const cls = t.cls==='win'?'ok':t.cls==='loss'?'bad':'be';
-    const resLabel = t.cls==='be' ? 'B/E' : (t.cls==='win'?'Win':'Loss');
+    const cls = t.cls==='win'?'ok':'bad';
     const rTxt = Number.isFinite(t.R) ? t.R.toFixed(2) : '';
     return `
       <tr>
         <td>${t.dateStr || t.dateObj.toLocaleDateString()}</td>
-        <td class="${cls}">${resLabel}</td>
+        <td class="${cls}">${t.cls==='win'?'Win':'Loss'}</td>
         <td>${rTxt}</td>
       </tr>`;
   }).join('');
