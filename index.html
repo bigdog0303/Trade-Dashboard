@@ -16,10 +16,14 @@
   h1{margin:0;font-size:1.35rem}
   .muted{color:var(--muted);font-size:.9rem}
 
-  .controls{display:flex;gap:8px;align-items:center;margin:10px 0 0}
+  .controls{display:flex;gap:8px;align-items:center;margin:10px 0 0;flex-wrap:wrap}
   .btn{border:1px solid var(--line);background:transparent;color:var(--fg);padding:6px 10px;border-radius:10px;font-size:.9rem;cursor:pointer}
   .btn.active{background:var(--accent);color:var(--accentfg);border-color:transparent}
   .range-note{margin-left:8px;color:var(--muted);font-size:.9rem}
+
+  .monthbar{display:flex;gap:8px;overflow:auto;padding:8px 0}
+  .chip{border:1px solid var(--line);padding:6px 10px;border-radius:999px;white-space:nowrap;cursor:pointer;font-size:.9rem}
+  .chip.active{background:var(--accent);color:var(--accentfg);border-color:transparent}
 
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
   .card{border:1px solid var(--line);border-radius:12px;padding:12px}
@@ -41,8 +45,10 @@
       <div class="controls">
         <button id="allBtn"  class="btn active">All</button>
         <button id="weekBtn" class="btn">This Week</button>
+        <button id="monthTabBtn" class="btn">Monthly</button>
         <span id="rangeNote" class="range-note"></span>
       </div>
+      <div id="monthBar" class="monthbar" style="display:none"></div>
     </div>
     <div class="muted" id="updated"></div>
   </header>
@@ -132,6 +138,8 @@ function parseCSV(text){
     return isWin(row.resultRaw) || isLoss(row.resultRaw);
   }).map(row=>{
     row.cls = /^\s*(\d+\s*)?win\s*$/i.test(row.resultRaw) ? 'win' : 'loss';
+    // month key "YYYY-MM" for grouping
+    row.monthKey = `${row.dateObj.getFullYear()}-${String(row.dateObj.getMonth()+1).padStart(2,'0')}`;
     return row;
   });
 
@@ -139,23 +147,24 @@ function parseCSV(text){
   return trades;
 }
 
-/* ---------- Filtering + Metrics ---------- */
+/* ---------- Time helpers & metrics ---------- */
 function startOfThisWeek(date=new Date()){
-  // Monday 00:00 local
   const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   const dow = d.getDay(); // Sun=0..Sat=6
-  const diff = (dow===0 ? -6 : 1 - dow); // shift to Monday
+  const diff = (dow===0 ? -6 : 1 - dow); // to Monday
   d.setDate(d.getDate() + diff);
   d.setHours(0,0,0,0);
   return d;
 }
 function endOfThisWeek(date=new Date()){
   const s = startOfThisWeek(date);
-  const e = new Date(s); e.setDate(s.getDate()+7); return e; // [s, e)
+  const e = new Date(s); e.setDate(s.getDate()+7); return e; // [s,e)
 }
-function fmtShort(d){
-  return d.toLocaleDateString([], {month:'short', day:'2-digit'});
+function monthLabelFromKey(k){ // "2025-11" -> "Nov 2025"
+  const [y,m] = k.split('-').map(n=>+n);
+  return new Date(y, m-1, 1).toLocaleDateString([], {month:'short', year:'numeric'});
 }
+function fmtShort(d){ return d.toLocaleDateString([], {month:'short', day:'2-digit'}); }
 
 function metrics(trades){
   const wins = trades.filter(t=>t.cls==='win');
@@ -169,7 +178,7 @@ function metrics(trades){
 
   const pW = total ? (wins.length / total) : 0;
   const pL = 1 - pW;
-  const expectancy = pW * avgWin + pL * avgLoss; // R per trade
+  const expectancy = pW * avgWin + pL * avgLoss;
 
   const netR = winR + lossR;
   const winrate = total ? (wins.length / total * 100) : 0;
@@ -177,18 +186,47 @@ function metrics(trades){
   return { total, winrate, expectancy, netR, wins: wins.length, losses: losses.length };
 }
 
-/* ---------- Render ---------- */
+/* ---------- State & render ---------- */
 let ALL_TRADES = [];
-let MODE = 'all'; // 'all' | 'week'
+let MODE = 'all';          // 'all' | 'week' | 'month'
+let ACTIVE_MONTH = null;   // "YYYY-MM"
 let chart;
 
 function render(){
-  const s = startOfThisWeek();
-  const e = endOfThisWeek();
+  const monthBar = document.getElementById('monthBar');
+  const rangeNote = document.getElementById('rangeNote');
 
-  const filtered = (MODE==='week')
-    ? ALL_TRADES.filter(t => t.dateObj >= s && t.dateObj < e)
-    : ALL_TRADES;
+  // Build month list from data
+  const months = Array.from(new Set(ALL_TRADES.map(t=>t.monthKey))).sort();
+  if (MODE === 'month'){
+    monthBar.style.display = '';
+    // If no active month, default to latest
+    if (!ACTIVE_MONTH) ACTIVE_MONTH = months[months.length-1];
+    // Render chips
+    monthBar.innerHTML = months.map(mk=>{
+      const active = mk===ACTIVE_MONTH ? 'chip active' : 'chip';
+      return `<span class="${active}" data-mk="${mk}">${monthLabelFromKey(mk)}</span>`;
+    }).join('');
+    // click handlers
+    monthBar.querySelectorAll('.chip').forEach(ch=>{
+      ch.onclick = ()=>{ ACTIVE_MONTH = ch.getAttribute('data-mk'); render(); };
+    });
+  } else {
+    monthBar.style.display = 'none';
+  }
+
+  // Choose filtered set
+  let filtered = ALL_TRADES;
+  if (MODE==='week'){
+    const s = startOfThisWeek(), e = endOfThisWeek();
+    filtered = ALL_TRADES.filter(t => t.dateObj >= s && t.dateObj < e);
+    rangeNote.textContent = `This week: ${fmtShort(s)} — ${fmtShort(new Date(e.getTime()-86400000))}`;
+  } else if (MODE==='month' && ACTIVE_MONTH){
+    filtered = ALL_TRADES.filter(t => t.monthKey === ACTIVE_MONTH);
+    rangeNote.textContent = monthLabelFromKey(ACTIVE_MONTH);
+  } else {
+    rangeNote.textContent = 'All trades';
+  }
 
   const { total, winrate, expectancy, netR, wins, losses } = metrics(filtered);
 
@@ -199,20 +237,10 @@ function render(){
   document.getElementById('k-netR').textContent    = isFinite(netR) ? netR.toFixed(2) : '–';
   document.getElementById('note').textContent      = `Wins: ${wins} · Losses: ${losses}`;
 
-  // Range note
-  const rn = document.getElementById('rangeNote');
-  if (MODE==='week'){
-    rn.textContent = `This week: ${fmtShort(s)} — ${fmtShort(new Date(e.getTime()-86400000))}`;
-  } else {
-    rn.textContent = 'All trades';
-  }
-
   // Equity curve for filtered set
   let cum=0;
   const labels = filtered.map(t=> t.dateStr || t.dateObj.toISOString().slice(0,10));
   const eq = filtered.map(t=> (cum += (Number.isFinite(t.R)? t.R : 0)));
-
-  // build / update chart
   const ctx = document.getElementById('eq');
   if (chart) chart.destroy();
   chart = new Chart(ctx, {
@@ -223,7 +251,7 @@ function render(){
     }
   });
 
-  // Latest 10 table (filtered)
+  // Latest 10 table
   const last = filtered.slice(-10).reverse();
   const rowsHtml = last.map(t=>{
     const cls = t.cls==='win'?'ok':'bad';
@@ -236,9 +264,7 @@ function render(){
   }).join('');
   document.getElementById('table-wrap').innerHTML = `
     <table>
-      <thead><tr>
-        <th>Date</th><th>Result</th><th>R</th>
-      </tr></thead>
+      <thead><tr><th>Date</th><th>Result</th><th>R</th></tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>`;
 }
@@ -269,18 +295,27 @@ async function load(){
   render();
 }
 
-document.getElementById('allBtn').addEventListener('click', ()=>{
-  MODE='all';
+document.getElementById('allBtn').onclick = ()=>{
+  MODE='all'; ACTIVE_MONTH=null;
   document.getElementById('allBtn').classList.add('active');
   document.getElementById('weekBtn').classList.remove('active');
+  document.getElementById('monthTabBtn').classList.remove('active');
   render();
-});
-document.getElementById('weekBtn').addEventListener('click', ()=>{
-  MODE='week';
+};
+document.getElementById('weekBtn').onclick = ()=>{
+  MODE='week'; ACTIVE_MONTH=null;
   document.getElementById('weekBtn').classList.add('active');
   document.getElementById('allBtn').classList.remove('active');
+  document.getElementById('monthTabBtn').classList.remove('active');
   render();
-});
+};
+document.getElementById('monthTabBtn').onclick = ()=>{
+  MODE='month';
+  document.getElementById('monthTabBtn').classList.add('active');
+  document.getElementById('allBtn').classList.remove('active');
+  document.getElementById('weekBtn').classList.remove('active');
+  render();
+};
 
 load();
 </script>
