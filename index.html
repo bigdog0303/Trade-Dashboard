@@ -6,15 +6,21 @@
 <meta name="theme-color" content="#0c0c0c">
 <title>Trade Dashboard</title>
 <style>
-  :root{--fg:#111;--muted:#666;--line:#e6e6e6;--bg:#fff}
+  :root{--fg:#111;--muted:#666;--line:#e6e6e6;--bg:#fff;--accent:#ffd54d;--accentfg:#6b4f00}
   @media (prefers-color-scheme: dark){
-    :root{--fg:#eee;--muted:#aaa;--line:#2a2a2a;--bg:#0c0c0c}
+    :root{--fg:#eee;--muted:#aaa;--line:#2a2a2a;--bg:#0c0c0c;--accent:#775f1a;--accentfg:#ffd54d}
   }
   html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
   main{max-width:1000px;margin:20px auto;padding:0 16px}
   header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
   h1{margin:0;font-size:1.35rem}
   .muted{color:var(--muted);font-size:.9rem}
+
+  .controls{display:flex;gap:8px;align-items:center;margin:10px 0 0}
+  .btn{border:1px solid var(--line);background:transparent;color:var(--fg);padding:6px 10px;border-radius:10px;font-size:.9rem;cursor:pointer}
+  .btn.active{background:var(--accent);color:var(--accentfg);border-color:transparent}
+  .range-note{margin-left:8px;color:var(--muted);font-size:.9rem}
+
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
   .card{border:1px solid var(--line);border-radius:12px;padding:12px}
   .k{font-size:.9rem;color:var(--muted)}
@@ -30,14 +36,21 @@
 <body>
 <main>
   <header>
-    <h1>Trade Dashboard</h1>
+    <div>
+      <h1>Trade Dashboard</h1>
+      <div class="controls">
+        <button id="allBtn"  class="btn active">All</button>
+        <button id="weekBtn" class="btn">This Week</button>
+        <span id="rangeNote" class="range-note"></span>
+      </div>
+    </div>
     <div class="muted" id="updated"></div>
   </header>
 
   <div class="grid">
     <div class="card"><div class="k">Total Trades</div><div class="v" id="k-total">–</div></div>
     <div class="card"><div class="k">Win Rate</div><div class="v" id="k-winrate">–</div></div>
-    <div class="card"><div class="k">Avg R</div><div class="v" id="k-avgR">–</div></div>
+    <div class="card"><div class="k">Expectancy (R/trade)</div><div class="v" id="k-exp">–</div></div>
     <div class="card"><div class="k">Net R</div><div class="v" id="k-netR">–</div></div>
   </div>
 
@@ -53,14 +66,14 @@
   </div>
 
   <div id="empty" class="empty" style="display:none">
-    Add a <code>data.csv</code> with headers including at least <code>Date, Result, R</code>.
+    Add a <code>data.csv</code> with headers including at least <code>Date, Result, R</code>.<br>
     Only rows where Result is exactly <strong>Win</strong> or <strong>Loss</strong> are counted.
   </div>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
-/* ---------- Strict CSV parsing + strict counting ---------- */
+/* ---------- Strict CSV parsing ---------- */
 function parseCSV(text){
   const lines = text.replace(/\r/g,'').trim().split('\n');
   const rows = lines.map(line=>{
@@ -76,77 +89,163 @@ function parseCSV(text){
   });
   if(!rows.length) return [];
 
-  // headers (case-insensitive)
   const header = rows[0].map(h=>h.trim().toLowerCase());
-  const getIdx = name => header.indexOf(name);
-
-  const iDate   = getIdx('date');
-  const iResult = getIdx('result');
-  const iR      = getIdx('r');
-
+  const iDate   = header.indexOf('date');
+  const iResult = header.indexOf('result');
+  const iR      = header.indexOf('r');
   if (iDate < 0 || iResult < 0 || iR < 0) return [];
 
   function parseDateFlexible(s){
     if(!s) return null;
     const t = s.trim();
-    let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);                      // 2025-11-05
     if(m) return new Date(+m[1], +m[2]-1, +m[3]);
-    m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);                      // 11/05/2025 or 5/11/25
     if(m){ let a=+m[1], b=+m[2], y=+m[3]; if(y<100) y+=2000;
       const mm = (a<=12 && (b>12 || b<=31)) ? a : b;
       const dd = (mm===a) ? b : a;
       return new Date(y, mm-1, dd);
     }
-    m = t.match(/^(\d{1,2})[-\s](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-\s](\d{2,4})$/i);
+    m = t.match(/^(\d{1,2})[-\s](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-\s](\d{2,4})$/i); // 1-Apr-2025
     if(m){
       const dd = +m[1];
       const mon = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(m[2].toLowerCase());
       let y = +m[3]; if(y<100) y+=2000;
       if(mon>=0) return new Date(y, mon, dd);
     }
-    const d = new Date(t);
-    return isNaN(d) ? null : d;
+    const d = new Date(t); return isNaN(d) ? null : d;
   }
 
-  const cleanNum = x => {
-    if (x==null) return NaN;
-    return parseFloat(String(x).replace(/[−–—]/g,'-').replace(',','.'));
-  };
+  const cleanNum = x => parseFloat(String(x??'').replace(/[−–—]/g,'-').replace(',','.'));
 
-  // Build records
-  const data = rows.slice(1).map(r=>{
-    const dateStr = r[iDate] ?? '';
-    const dateObj = parseDateFlexible(dateStr);
-    const resultRaw = (r[iResult] ?? '').trim();
-    const resultLC  = resultRaw.toLowerCase();
-    const R = cleanNum(r[iR]);
-
-    return { dateStr, dateObj, resultRaw, resultLC, R };
-  });
-
-  // STRICT: Count only exact Win/Loss results (allow optional rating prefix like "3 Win")
   const isWin  = s => /^\s*(\d+\s*)?win\s*$/i.test(s);
   const isLoss = s => /^\s*(\d+\s*)?loss\s*$/i.test(s);
 
-  const trades = data.filter(row => {
+  const trades = rows.slice(1).map(r=>{
+    const dateStr = r[iDate] ?? '';
+    const dateObj = parseDateFlexible(dateStr);
+    const resultRaw = (r[iResult] ?? '').trim();
+    const R = cleanNum(r[iR]);
+    return { dateStr, dateObj, resultRaw, R };
+  }).filter(row=>{
     if(!(row.dateObj instanceof Date) || isNaN(row.dateObj)) return false;
     return isWin(row.resultRaw) || isLoss(row.resultRaw);
+  }).map(row=>{
+    row.cls = /^\s*(\d+\s*)?win\s*$/i.test(row.resultRaw) ? 'win' : 'loss';
+    return row;
   });
 
-  // classify
-  trades.forEach(t=>{
-    t.cls = isWin(t.resultRaw) ? 'win' : 'loss';
-  });
-
-  // sort by date
   trades.sort((a,b)=> a.dateObj - b.dateObj);
-
   return trades;
 }
 
+/* ---------- Filtering + Metrics ---------- */
+function startOfThisWeek(date=new Date()){
+  // Monday 00:00 local
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const dow = d.getDay(); // Sun=0..Sat=6
+  const diff = (dow===0 ? -6 : 1 - dow); // shift to Monday
+  d.setDate(d.getDate() + diff);
+  d.setHours(0,0,0,0);
+  return d;
+}
+function endOfThisWeek(date=new Date()){
+  const s = startOfThisWeek(date);
+  const e = new Date(s); e.setDate(s.getDate()+7); return e; // [s, e)
+}
+function fmtShort(d){
+  return d.toLocaleDateString([], {month:'short', day:'2-digit'});
+}
+
+function metrics(trades){
+  const wins = trades.filter(t=>t.cls==='win');
+  const losses = trades.filter(t=>t.cls==='loss');
+  const total = wins.length + losses.length;
+
+  const winR = wins.reduce((s,t)=> s + (Number.isFinite(t.R)? t.R:0), 0);
+  const lossR = losses.reduce((s,t)=> s + (Number.isFinite(t.R)? t.R:0), 0);
+  const avgWin = wins.length ? (winR / wins.length) : 0;
+  const avgLoss = losses.length ? (lossR / losses.length) : 0;
+
+  const pW = total ? (wins.length / total) : 0;
+  const pL = 1 - pW;
+  const expectancy = pW * avgWin + pL * avgLoss; // R per trade
+
+  const netR = winR + lossR;
+  const winrate = total ? (wins.length / total * 100) : 0;
+
+  return { total, winrate, expectancy, netR, wins: wins.length, losses: losses.length };
+}
+
+/* ---------- Render ---------- */
+let ALL_TRADES = [];
+let MODE = 'all'; // 'all' | 'week'
+let chart;
+
+function render(){
+  const s = startOfThisWeek();
+  const e = endOfThisWeek();
+
+  const filtered = (MODE==='week')
+    ? ALL_TRADES.filter(t => t.dateObj >= s && t.dateObj < e)
+    : ALL_TRADES;
+
+  const { total, winrate, expectancy, netR, wins, losses } = metrics(filtered);
+
+  // KPIs
+  document.getElementById('k-total').textContent   = total;
+  document.getElementById('k-winrate').textContent = isFinite(winrate) ? winrate.toFixed(1)+'%' : '–';
+  document.getElementById('k-exp').textContent     = isFinite(expectancy) ? expectancy.toFixed(2) : '–';
+  document.getElementById('k-netR').textContent    = isFinite(netR) ? netR.toFixed(2) : '–';
+  document.getElementById('note').textContent      = `Wins: ${wins} · Losses: ${losses}`;
+
+  // Range note
+  const rn = document.getElementById('rangeNote');
+  if (MODE==='week'){
+    rn.textContent = `This week: ${fmtShort(s)} — ${fmtShort(new Date(e.getTime()-86400000))}`;
+  } else {
+    rn.textContent = 'All trades';
+  }
+
+  // Equity curve for filtered set
+  let cum=0;
+  const labels = filtered.map(t=> t.dateStr || t.dateObj.toISOString().slice(0,10));
+  const eq = filtered.map(t=> (cum += (Number.isFinite(t.R)? t.R : 0)));
+
+  // build / update chart
+  const ctx = document.getElementById('eq');
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type:'line',
+    data:{labels, datasets:[{data:eq, fill:false, tension:0.2}]},
+    options:{responsive:true, plugins:{legend:{display:false}},
+      scales:{x:{display:false}, y:{ticks:{callback:v=>v+'R'}}}
+    }
+  });
+
+  // Latest 10 table (filtered)
+  const last = filtered.slice(-10).reverse();
+  const rowsHtml = last.map(t=>{
+    const cls = t.cls==='win'?'ok':'bad';
+    return `
+      <tr>
+        <td>${t.dateStr || t.dateObj.toLocaleDateString()}</td>
+        <td class="${cls}">${t.cls==='win'?'Win':'Loss'}</td>
+        <td>${Number.isFinite(t.R)? t.R.toFixed(2) : ''}</td>
+      </tr>`;
+  }).join('');
+  document.getElementById('table-wrap').innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Date</th><th>Result</th><th>R</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>`;
+}
+
+/* ---------- Init ---------- */
 async function load(){
   document.getElementById('updated').textContent='Loading…';
-
   let csv;
   try{
     const res = await fetch('data.csv?cb='+Date.now());
@@ -165,55 +264,23 @@ async function load(){
     return;
   }
 
-  // Metrics (strict)
-  const wins   = trades.filter(t=>t.cls==='win').length;
-  const losses = trades.filter(t=>t.cls==='loss').length;
-  const total  = wins + losses;
-
-  const netR = trades.reduce((s,t)=> s + (Number.isFinite(t.R)? t.R : 0), 0);
-  const avgR = total ? (netR / total) : 0;
-  const winrate = total ? (wins / total * 100) : 0;
-
-  // KPIs
-  document.getElementById('k-total').textContent   = total;
-  document.getElementById('k-winrate').textContent = winrate.toFixed(1)+'%';
-  document.getElementById('k-avgR').textContent    = avgR.toFixed(2);
-  document.getElementById('k-netR').textContent    = netR.toFixed(2);
-  document.getElementById('updated').textContent   = 'Updated: '+new Date().toLocaleString();
-  document.getElementById('note').textContent      = `Wins: ${wins} · Losses: ${losses}`;
-
-  // Equity curve (only counted trades)
-  let cum=0;
-  const labels = trades.map(t=> t.dateStr || t.dateObj.toISOString().slice(0,10));
-  const eq = trades.map(t=> (cum += (Number.isFinite(t.R)? t.R : 0)));
-  new Chart(document.getElementById('eq'),{
-    type:'line',
-    data:{labels,datasets:[{data:eq,fill:false,tension:0.2}]},
-    options:{responsive:true,plugins:{legend:{display:false}},
-      scales:{x:{display:false},y:{ticks:{callback:v=>v+'R'}}}
-    }
-  });
-
-  // Latest 10
-  const last = trades.slice(-10).reverse();
-  const rowsHtml = last.map(t=>{
-    const cls = t.cls==='win'?'ok':'bad';
-    const rTxt = Number.isFinite(t.R) ? t.R.toFixed(2) : '';
-    return `
-      <tr>
-        <td>${t.dateStr || t.dateObj.toLocaleDateString()}</td>
-        <td class="${cls}">${t.cls==='win'?'Win':'Loss'}</td>
-        <td>${rTxt}</td>
-      </tr>`;
-  }).join('');
-  document.getElementById('table-wrap').innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Date</th><th>Result</th><th>R</th>
-      </tr></thead>
-      <tbody>${rowsHtml}</tbody>
-    </table>`;
+  ALL_TRADES = trades;
+  document.getElementById('updated').textContent='Updated: '+new Date().toLocaleString();
+  render();
 }
+
+document.getElementById('allBtn').addEventListener('click', ()=>{
+  MODE='all';
+  document.getElementById('allBtn').classList.add('active');
+  document.getElementById('weekBtn').classList.remove('active');
+  render();
+});
+document.getElementById('weekBtn').addEventListener('click', ()=>{
+  MODE='week';
+  document.getElementById('weekBtn').classList.add('active');
+  document.getElementById('allBtn').classList.remove('active');
+  render();
+});
 
 load();
 </script>
