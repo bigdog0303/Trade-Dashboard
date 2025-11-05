@@ -53,95 +53,166 @@
   </div>
 
   <div id="empty" class="empty" style="display:none">
-    Add a <code>data.csv</code> file to this repo (Export your Excel → CSV) with a header row like:<br><br>
-    <code>Date,Pair,Setup,Result,R,Week,Notes</code><br>
-    <small>(Dates like 2025-11-05, Result as Win/Loss, R as a number)</small>
+    Add a <code>data.csv</code> (Export from Excel). First row should be headers including at least
+    <code>Date, Result, R</code>. Optional: <code>Pair, Setup, Week, Notes</code>.
   </div>
 </main>
 
-<!-- Chart.js for equity curve -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
+/* --- Robust CSV + date parsing --- */
 function parseCSV(text){
-  const rows = text.replace(/\r/g,'').trim().split('\n').map(r=>{
-    const out=[];let cur='';let q=false;
-    for(let i=0;i<r.length;i++){
-      const c=r[i];
-      if(c==='"'){q=!q;continue;}
-      if(c===','&&!q){out.push(cur);cur='';continue;}
-      cur+=c;
+  // Split respecting quotes
+  const lines = text.replace(/\r/g,'').trim().split('\n');
+  const rows = lines.map(line=>{
+    const out=[]; let cur=''; let q=false;
+    for(let i=0;i<line.length;i++){
+      const c=line[i];
+      if(c === '"'){ q = !q; continue; }
+      if(c === ',' && !q){ out.push(cur); cur=''; continue; }
+      cur += c;
     }
     out.push(cur);
     return out.map(s=>s.trim());
   });
-  const header=rows[0].map(h=>h.toLowerCase());
-  const idx=Object.fromEntries(header.map((h,i)=>[h,i]));
-  const data=rows.slice(1).map(r=>({
-    date:r[idx.date]||'',
-    pair:r[idx.pair]||'',
-    setup:r[idx.setup]||'',
-    result:(r[idx.result]||'').toLowerCase(),
-    R:parseFloat(r[idx.r]),
-    week:r[idx.week]||'',
-    notes:r[idx.notes]||'',
-  })).filter(x=>{
-    const dOk=/\d{4}-\d{2}-\d{2}/.test(x.date)||/\d{1,2}\/\d{1,2}\/\d{2,4}/.test(x.date);
-    return dOk&&!Number.isNaN(x.R);
+
+  if(!rows.length) return [];
+
+  // Header map (case-insensitive)
+  const header = rows[0].map(h=>h.trim().toLowerCase());
+  const idx = Object.fromEntries(header.map((h,i)=>[h,i]));
+
+  // Helper: get column safely (multiple possible names)
+  const col = (names) => {
+    for (const n of names) if (idx[n] != null) return idx[n];
+    return -1;
+  };
+
+  const iDate = col(['date']);
+  const iResult = col(['result','outcome']);
+  const iR = col(['r','rr','net r','netr']);
+  const iPair = col(['pair','symbol','asset']);
+  const iSetup = col(['setup','strategy','pattern']);
+  const iWeek = col(['week','week #','weekno','week number']);
+  const iNotes = col(['notes','note','comment','comments']);
+
+  function parseDateFlexible(s){
+    if(!s) return null;
+    const t = s.trim();
+
+    // 1) 2025-11-05
+    let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if(m) return new Date(Number(m[1]), Number(m[2])-1, Number(m[3]));
+
+    // 2) 1/5/2025 or 11/05/25 (assume MM/DD if first <=12 else DD/MM)
+    m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if(m){
+      let a=Number(m[1]), b=Number(m[2]), y=Number(m[3]); if(y<100) y+=2000;
+      const mm = (a<=12 && (b>12 || a<=12 && b<=31)) ? a : b;
+      const dd = (mm===a) ? b : a;
+      return new Date(y, mm-1, dd);
+    }
+
+    // 3) 1-Apr-2025 / 01-Apr-2025 / 1 Apr 2025
+    m = t.match(/^(\d{1,2})[-\s](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-\s](\d{2,4})$/i);
+    if(m){
+      const dd = Number(m[1]);
+      const mon = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(m[2].toLowerCase());
+      let y = Number(m[3]); if(y<100) y+=2000;
+      if(mon>=0) return new Date(y, mon, dd);
+    }
+
+    // 4) Fallback native parser (last resort)
+    const d = new Date(t);
+    return isNaN(d) ? null : d;
+  }
+
+  const data = rows.slice(1).map(r=>{
+    const dateStr = iDate>=0 ? r[iDate] : '';
+    const d = parseDateFlexible(dateStr);
+    const Rraw = iR>=0 ? r[iR] : '';
+    const R = parseFloat(String(Rraw).replace(',','.'));
+    const result = (iResult>=0 ? r[iResult] : '').trim().toLowerCase();
+    return {
+      dateStr, dateObj: d,
+      pair: iPair>=0 ? r[iPair] : '',
+      setup: iSetup>=0 ? r[iSetup] : '',
+      result,
+      R: Number.isFinite(R) ? R : NaN,
+      week: iWeek>=0 ? r[iWeek] : '',
+      notes: iNotes>=0 ? r[iNotes] : '',
+    };
+  }).filter(row=>{
+    // Keep rows that have a valid date AND a numeric R
+    return row.dateObj instanceof Date && !isNaN(row.dateObj) && Number.isFinite(row.R);
   });
+
   return data;
 }
 
 async function load(){
   document.getElementById('updated').textContent='Loading…';
+
   let csv;
   try{
-    const res=await fetch('data.csv?cb='+Date.now());
-    if(!res.ok)throw new Error('no csv');
-    csv=await res.text();
+    const res = await fetch('data.csv?cb='+Date.now());
+    if(!res.ok) throw new Error('no csv');
+    csv = await res.text();
   }catch(e){
     document.getElementById('empty').style.display='';
     document.getElementById('updated').textContent='';
     return;
   }
 
-  const trades=parseCSV(csv);
-  trades.sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const trades = parseCSV(csv);
+  if(!trades.length){
+    document.getElementById('empty').style.display='';
+    document.getElementById('updated').textContent='Updated: '+new Date().toLocaleString();
+    return;
+  }
 
-  const total=trades.length;
-  const wins=trades.filter(t=>t.result.startsWith('win')).length;
-  const netR=trades.reduce((s,t)=>s+(isFinite(t.R)?t.R:0),0);
-  const avgR=total?(netR/total):0;
-  const winrate=total?(wins/total*100):0;
+  // Sort by date ascending
+  trades.sort((a,b)=> a.dateObj - b.dateObj);
 
-  document.getElementById('k-total').textContent=total;
-  document.getElementById('k-winrate').textContent=winrate.toFixed(1)+'%';
-  document.getElementById('k-avgR').textContent=avgR.toFixed(2);
-  document.getElementById('k-netR').textContent=netR.toFixed(2);
+  // KPIs
+  const total = trades.length;
+  const wins = trades.filter(t=> t.result.startsWith('win')).length;
+  const netR = trades.reduce((s,t)=> s + t.R, 0);
+  const avgR = netR / total;
+  const winrate = (wins / total) * 100;
+
+  document.getElementById('k-total').textContent = total;
+  document.getElementById('k-winrate').textContent = winrate.toFixed(1)+'%';
+  document.getElementById('k-avgR').textContent = avgR.toFixed(2);
+  document.getElementById('k-netR').textContent = netR.toFixed(2);
   document.getElementById('updated').textContent='Updated: '+new Date().toLocaleString();
 
+  // Equity curve
   let cum=0;
-  const labels=trades.map(t=>t.date);
-  const eq=trades.map(t=>(cum+=(isFinite(t.R)?t.R:0)));
+  const labels = trades.map(t=> t.dateStr || t.dateObj.toISOString().slice(0,10));
+  const eq = trades.map(t=> (cum += t.R));
   new Chart(document.getElementById('eq'),{
     type:'line',
     data:{labels,datasets:[{data:eq,fill:false,tension:0.2}]},
     options:{responsive:true,plugins:{legend:{display:false}},
-    scales:{x:{display:false},y:{ticks:{callback:v=>v+'R'}}}}
+      scales:{x:{display:false},y:{ticks:{callback:v=>v+'R'}}}
+    }
   });
 
-  const last=trades.slice(-10).reverse();
-  const rows=last.map(t=>`
+  // Latest 10
+  const last = trades.slice(-10).reverse();
+  const rows = last.map(t=>`
     <tr>
-      <td>${t.date}</td>
+      <td>${t.dateStr || t.dateObj.toLocaleDateString()}</td>
       <td>${t.pair||''}</td>
       <td>${t.setup||''}</td>
-      <td class="${t.result.startsWith('win')?'ok':'bad'}">${t.result||''}</td>
-      <td>${isFinite(t.R)?t.R.toFixed(2):''}</td>
+      <td class="${t.result.startsWith('win')?'ok':(t.result.startsWith('loss')?'bad':'')}">${t.result||''}</td>
+      <td>${t.R.toFixed(2)}</td>
       <td>${t.week||''}</td>
       <td>${t.notes||''}</td>
     </tr>
   `).join('');
-  document.getElementById('table-wrap').innerHTML=`
+  document.getElementById('table-wrap').innerHTML = `
     <table>
       <thead><tr>
         <th>Date</th><th>Pair</th><th>Setup</th><th>Result</th><th>R</th><th>Week</th><th>Notes</th>
@@ -149,6 +220,7 @@ async function load(){
       <tbody>${rows}</tbody>
     </table>`;
 }
+
 load();
 </script>
 </body>
