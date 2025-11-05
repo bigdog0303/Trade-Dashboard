@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0c0c0c">
+<title>Trade Dashboard</title>
+<style>
+  :root{--fg:#111;--muted:#666;--line:#e6e6e6;--bg:#fff}
+  @media (prefers-color-scheme: dark){
+    :root{--fg:#eee;--muted:#aaa;--line:#2a2a2a;--bg:#0c0c0c}
+  }
+  html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  main{max-width:1000px;margin:20px auto;padding:0 16px}
+  header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+  h1{margin:0;font-size:1.35rem}
+  .muted{color:var(--muted);font-size:.9rem}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
+  .card{border:1px solid var(--line);border-radius:12px;padding:12px}
+  .k{font-size:.9rem;color:var(--muted)}
+  .v{font-size:1.4rem;font-weight:700;margin-top:4px}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th,td{border-bottom:1px solid var(--line);padding:8px 6px;text-align:left;font-size:.92rem}
+  th{font-weight:700}
+  .empty{padding:12px;border:1px dashed var(--line);border-radius:12px;color:var(--muted)}
+  .ok{color:#22c55e}.bad{color:#ef4444}
+  canvas{width:100%;max-width:100%;height:240px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Trade Dashboard</h1>
+    <div class="muted" id="updated"></div>
+  </header>
+
+  <div class="grid">
+    <div class="card"><div class="k">Total Trades</div><div class="v" id="k-total">–</div></div>
+    <div class="card"><div class="k">Win Rate</div><div class="v" id="k-winrate">–</div></div>
+    <div class="card"><div class="k">Avg R</div><div class="v" id="k-avgR">–</div></div>
+    <div class="card"><div class="k">Net R</div><div class="v" id="k-netR">–</div></div>
+  </div>
+
+  <div class="card">
+    <div class="k">Equity Curve (R)</div>
+    <canvas id="eq"></canvas>
+    <div class="muted">Based on cumulative R from your CSV.</div>
+  </div>
+
+  <div class="card">
+    <div class="k">Latest 10 Trades</div>
+    <div id="table-wrap"></div>
+  </div>
+
+  <div id="empty" class="empty" style="display:none">
+    Add a <code>data.csv</code> file to this repo (Export your Excel → CSV) with a header row like:<br><br>
+    <code>Date,Pair,Setup,Result,R,Week,Notes</code><br>
+    <small>(Dates like 2025-11-05, Result as Win/Loss, R as a number)</small>
+  </div>
+</main>
+
+<!-- Chart.js for equity curve -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+function parseCSV(text){
+  const rows = text.replace(/\r/g,'').trim().split('\n').map(r=>{
+    const out=[];let cur='';let q=false;
+    for(let i=0;i<r.length;i++){
+      const c=r[i];
+      if(c==='"'){q=!q;continue;}
+      if(c===','&&!q){out.push(cur);cur='';continue;}
+      cur+=c;
+    }
+    out.push(cur);
+    return out.map(s=>s.trim());
+  });
+  const header=rows[0].map(h=>h.toLowerCase());
+  const idx=Object.fromEntries(header.map((h,i)=>[h,i]));
+  const data=rows.slice(1).map(r=>({
+    date:r[idx.date]||'',
+    pair:r[idx.pair]||'',
+    setup:r[idx.setup]||'',
+    result:(r[idx.result]||'').toLowerCase(),
+    R:parseFloat(r[idx.r]),
+    week:r[idx.week]||'',
+    notes:r[idx.notes]||'',
+  })).filter(x=>{
+    const dOk=/\d{4}-\d{2}-\d{2}/.test(x.date)||/\d{1,2}\/\d{1,2}\/\d{2,4}/.test(x.date);
+    return dOk&&!Number.isNaN(x.R);
+  });
+  return data;
+}
+
+async function load(){
+  document.getElementById('updated').textContent='Loading…';
+  let csv;
+  try{
+    const res=await fetch('data.csv?cb='+Date.now());
+    if(!res.ok)throw new Error('no csv');
+    csv=await res.text();
+  }catch(e){
+    document.getElementById('empty').style.display='';
+    document.getElementById('updated').textContent='';
+    return;
+  }
+
+  const trades=parseCSV(csv);
+  trades.sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  const total=trades.length;
+  const wins=trades.filter(t=>t.result.startsWith('win')).length;
+  const netR=trades.reduce((s,t)=>s+(isFinite(t.R)?t.R:0),0);
+  const avgR=total?(netR/total):0;
+  const winrate=total?(wins/total*100):0;
+
+  document.getElementById('k-total').textContent=total;
+  document.getElementById('k-winrate').textContent=winrate.toFixed(1)+'%';
+  document.getElementById('k-avgR').textContent=avgR.toFixed(2);
+  document.getElementById('k-netR').textContent=netR.toFixed(2);
+  document.getElementById('updated').textContent='Updated: '+new Date().toLocaleString();
+
+  let cum=0;
+  const labels=trades.map(t=>t.date);
+  const eq=trades.map(t=>(cum+=(isFinite(t.R)?t.R:0)));
+  new Chart(document.getElementById('eq'),{
+    type:'line',
+    data:{labels,datasets:[{data:eq,fill:false,tension:0.2}]},
+    options:{responsive:true,plugins:{legend:{display:false}},
+    scales:{x:{display:false},y:{ticks:{callback:v=>v+'R'}}}}
+  });
+
+  const last=trades.slice(-10).reverse();
+  const rows=last.map(t=>`
+    <tr>
+      <td>${t.date}</td>
+      <td>${t.pair||''}</td>
+      <td>${t.setup||''}</td>
+      <td class="${t.result.startsWith('win')?'ok':'bad'}">${t.result||''}</td>
+      <td>${isFinite(t.R)?t.R.toFixed(2):''}</td>
+      <td>${t.week||''}</td>
+      <td>${t.notes||''}</td>
+    </tr>
+  `).join('');
+  document.getElementById('table-wrap').innerHTML=`
+    <table>
+      <thead><tr>
+        <th>Date</th><th>Pair</th><th>Setup</th><th>Result</th><th>R</th><th>Week</th><th>Notes</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+load();
+</script>
+</body>
+</html>
