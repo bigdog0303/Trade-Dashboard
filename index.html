@@ -21,9 +21,10 @@
   .btn.active{background:var(--accent);color:var(--accentfg);border-color:transparent}
   .range-note{margin-left:8px;color:var(--muted);font-size:.9rem}
 
-  .monthbar{display:flex;gap:8px;overflow:auto;padding:8px 0}
-  .chip{border:1px solid var(--line);padding:6px 10px;border-radius:999px;white-space:nowrap;cursor:pointer;font-size:.9rem}
-  .chip.active{background:var(--accent);color:var(--accentfg);border-color:transparent}
+  /* Month dropdown replaces horizontal chips for mobile friendliness */
+  .month-controls{display:none;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+  .month-controls.show{display:flex}
+  select, input[type="text"]{border:1px solid var(--line);background:transparent;color:var(--fg);padding:6px 10px;border-radius:10px;font-size:.95rem}
 
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
   .card{border:1px solid var(--line);border-radius:12px;padding:12px}
@@ -35,6 +36,15 @@
   .empty{padding:12px;border:1px dashed var(--line);border-radius:12px;color:var(--muted)}
   .ok{color:#22c55e}.bad{color:#ef4444}
   canvas{width:100%;max-width:100%;height:240px}
+
+  /* Upload / Drop zone */
+  .upline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+  .drop{flex:1;min-width:240px;border:1px dashed var(--line);border-radius:12px;padding:10px;text-align:center;font-size:.9rem}
+  .drop.drag{outline:2px dashed var(--accentfg);outline-offset:2px}
+  .mini{font-size:.85rem;color:var(--muted)}
+
+  /* Utility */
+  .spacer{flex:1}
 </style>
 </head>
 <body>
@@ -42,13 +52,29 @@
   <header>
     <div>
       <h1>Trade Dashboard</h1>
+
       <div class="controls">
-        <button id="allBtn"  class="btn active">All</button>
+        <button id="allBtn"  class="btn">All</button>
         <button id="weekBtn" class="btn">This Week</button>
         <button id="monthTabBtn" class="btn">Monthly</button>
         <span id="rangeNote" class="range-note"></span>
       </div>
-      <div id="monthBar" class="monthbar" style="display:none"></div>
+
+      <!-- Replaces the chip bar with a compact dropdown -->
+      <div id="monthControls" class="month-controls">
+        <label for="monthSelect" class="muted">Month:</label>
+        <select id="monthSelect"></select>
+      </div>
+
+      <!-- Hybrid input row -->
+      <div class="upline">
+        <button id="sourceBtn" class="btn">⚙️ Data Source</button>
+        <input id="filePicker" type="file" accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel" style="display:none">
+        <button id="uploadBtn" class="btn">Upload .xlsx/.csv</button>
+        <div id="drop" class="drop">Drop Excel/CSV here or use <em>Upload</em></div>
+        <span class="mini" id="sourceStatus"></span>
+        <div class="spacer"></div>
+      </div>
     </div>
     <div class="muted" id="updated"></div>
   </header>
@@ -67,17 +93,18 @@
   </div>
 
   <div class="card">
-    <div class="k">Latest 10 Trades</div>
+    <div class="k" id="tableTitle">Latest 10 Trades</div>
     <div id="table-wrap"></div>
   </div>
 
   <div id="empty" class="empty" style="display:none">
-    Add a <code>data.csv</code> with headers including at least <code>Date, Result, R</code>.<br>
+    Add a <code>data.csv</code> (or set a OneDrive CSV link via <em>⚙️ Data Source</em>, or upload a file) with headers including at least <code>Date, Result, R</code>.<br>
     Only rows where Result is exactly <strong>Win</strong> or <strong>Loss</strong> are counted.
   </div>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 /* ---------- Strict CSV parsing ---------- */
 function parseCSV(text){
@@ -138,7 +165,6 @@ function parseCSV(text){
     return isWin(row.resultRaw) || isLoss(row.resultRaw);
   }).map(row=>{
     row.cls = /^\s*(\d+\s*)?win\s*$/i.test(row.resultRaw) ? 'win' : 'loss';
-    // month key "YYYY-MM" for grouping
     row.monthKey = `${row.dateObj.getFullYear()}-${String(row.dateObj.getMonth()+1).padStart(2,'0')}`;
     return row;
   });
@@ -160,10 +186,7 @@ function endOfThisWeek(date=new Date()){
   const s = startOfThisWeek(date);
   const e = new Date(s); e.setDate(s.getDate()+7); return e; // [s,e)
 }
-function monthLabelFromKey(k){ // "2025-11" -> "Nov 2025"
-  const [y,m] = k.split('-').map(n=>+n);
-  return new Date(y, m-1, 1).toLocaleDateString([], {month:'short', year:'numeric'});
-}
+function monthLabelFromKey(k){ const [y,m] = k.split('-').map(n=>+n); return new Date(y, m-1, 1).toLocaleDateString([], {month:'short', year:'numeric'}); }
 function fmtShort(d){ return d.toLocaleDateString([], {month:'short', day:'2-digit'}); }
 
 function metrics(trades){
@@ -186,33 +209,95 @@ function metrics(trades){
   return { total, winrate, expectancy, netR, wins: wins.length, losses: losses.length };
 }
 
-/* ---------- State & render ---------- */
+/* ---------- State ---------- */
 let ALL_TRADES = [];
-let MODE = 'all';          // 'all' | 'week' | 'month'
-let ACTIVE_MONTH = null;   // "YYYY-MM"
+let MODE = localStorage.getItem('mode') || 'all';          // 'all' | 'week' | 'month'
+let ACTIVE_MONTH = localStorage.getItem('active_month') || null;   // "YYYY-MM"
 let chart;
 
-function render(){
-  const monthBar = document.getElementById('monthBar');
-  const rangeNote = document.getElementById('rangeNote');
+/* ---------- UI wiring ---------- */
+const rangeNote = document.getElementById('rangeNote');
+const monthControls = document.getElementById('monthControls');
+const monthSelect = document.getElementById('monthSelect');
+const tableTitle = document.getElementById('tableTitle');
+const sourceStatus = document.getElementById('sourceStatus');
+const drop = document.getElementById('drop');
+const filePicker = document.getElementById('filePicker');
 
-  // Build month list from data
+document.getElementById('allBtn').onclick = ()=>{
+  MODE='all'; ACTIVE_MONTH=null; persistView();
+  setActiveTabs(); render();
+};
+document.getElementById('weekBtn').onclick = ()=>{
+  MODE='week'; ACTIVE_MONTH=null; persistView();
+  setActiveTabs(); render();
+};
+document.getElementById('monthTabBtn').onclick = ()=>{
+  MODE='month'; persistView();
+  setActiveTabs(); render();
+};
+document.getElementById('uploadBtn').onclick = ()=> filePicker.click();
+
+document.getElementById('sourceBtn').onclick = ()=>{
+  const current = localStorage.getItem('onedriveCsvUrl') || '';
+  const url = prompt('Paste your OneDrive CSV URL (public/readable). Tip: use a link that ends with ?download=1 or ?format=csv', current);
+  if(url===null) return; // cancelled
+  if(url.trim()){
+    localStorage.setItem('onedriveCsvUrl', url.trim());
+    sourceStatus.textContent = 'Source: OneDrive CSV';
+  }else{
+    localStorage.removeItem('onedriveCsvUrl');
+    sourceStatus.textContent = 'Source: default (upload or data.csv)';
+  }
+  load(); // reload from new source
+};
+
+filePicker.addEventListener('change', async (e)=>{
+  const f = e.target.files?.[0]; if(!f) return;
+  await loadFromFile(f);
+});
+['dragenter','dragover'].forEach(ev=>{
+  drop.addEventListener(ev, e=>{ e.preventDefault(); drop.classList.add('drag'); });
+});
+['dragleave','drop'].forEach(ev=>{
+  drop.addEventListener(ev, e=>{ e.preventDefault(); drop.classList.remove('drag'); });
+});
+drop.addEventListener('drop', async (e)=>{
+  const f = e.dataTransfer.files?.[0]; if(!f) return;
+  await loadFromFile(f);
+});
+
+monthSelect.addEventListener('change', ()=>{
+  ACTIVE_MONTH = monthSelect.value || null;
+  localStorage.setItem('active_month', ACTIVE_MONTH || '');
+  render();
+});
+
+function persistView(){
+  localStorage.setItem('mode', MODE);
+  if(ACTIVE_MONTH) localStorage.setItem('active_month', ACTIVE_MONTH);
+}
+
+function setActiveTabs(){
+  document.getElementById('allBtn').classList.toggle('active', MODE==='all');
+  document.getElementById('weekBtn').classList.toggle('active', MODE==='week');
+  document.getElementById('monthTabBtn').classList.toggle('active', MODE==='month');
+}
+
+/* ---------- Rendering ---------- */
+function render(){
+  // Build month list
   const months = Array.from(new Set(ALL_TRADES.map(t=>t.monthKey))).sort();
   if (MODE === 'month'){
-    monthBar.style.display = '';
-    // If no active month, default to latest
-    if (!ACTIVE_MONTH) ACTIVE_MONTH = months[months.length-1];
-    // Render chips
-    monthBar.innerHTML = months.map(mk=>{
-      const active = mk===ACTIVE_MONTH ? 'chip active' : 'chip';
-      return `<span class="${active}" data-mk="${mk}">${monthLabelFromKey(mk)}</span>`;
+    monthControls.classList.add('show');
+    // Default to latest month if none selected
+    if (!ACTIVE_MONTH && months.length) ACTIVE_MONTH = months[months.length-1];
+    monthSelect.innerHTML = months.map(mk=>{
+      const label = monthLabelFromKey(mk);
+      return `<option value="${mk}" ${mk===ACTIVE_MONTH?'selected':''}>${label}</option>`;
     }).join('');
-    // click handlers
-    monthBar.querySelectorAll('.chip').forEach(ch=>{
-      ch.onclick = ()=>{ ACTIVE_MONTH = ch.getAttribute('data-mk'); render(); };
-    });
   } else {
-    monthBar.style.display = 'none';
+    monthControls.classList.remove('show');
   }
 
   // Choose filtered set
@@ -221,11 +306,14 @@ function render(){
     const s = startOfThisWeek(), e = endOfThisWeek();
     filtered = ALL_TRADES.filter(t => t.dateObj >= s && t.dateObj < e);
     rangeNote.textContent = `This week: ${fmtShort(s)} — ${fmtShort(new Date(e.getTime()-86400000))}`;
+    tableTitle.textContent = 'Latest 10 Trades';
   } else if (MODE==='month' && ACTIVE_MONTH){
     filtered = ALL_TRADES.filter(t => t.monthKey === ACTIVE_MONTH);
     rangeNote.textContent = monthLabelFromKey(ACTIVE_MONTH);
+    tableTitle.textContent = 'All Trades (Selected Month)';
   } else {
     rangeNote.textContent = 'All trades';
+    tableTitle.textContent = 'Latest 10 Trades';
   }
 
   const { total, winrate, expectancy, netR, wins, losses } = metrics(filtered);
@@ -237,7 +325,7 @@ function render(){
   document.getElementById('k-netR').textContent    = isFinite(netR) ? netR.toFixed(2) : '–';
   document.getElementById('note').textContent      = `Wins: ${wins} · Losses: ${losses}`;
 
-  // Equity curve for filtered set
+  // Equity curve (filtered)
   let cum=0;
   const labels = filtered.map(t=> t.dateStr || t.dateObj.toISOString().slice(0,10));
   const eq = filtered.map(t=> (cum += (Number.isFinite(t.R)? t.R : 0)));
@@ -251,9 +339,14 @@ function render(){
     }
   });
 
-  // Latest 10 table
-  const last = filtered.slice(-10).reverse();
-  const rowsHtml = last.map(t=>{
+  // Table
+  let rowsForTable = filtered;
+  if (MODE!=='month'){ // All or Week -> latest 10 only
+    rowsForTable = filtered.slice(-10).reverse();
+  } else {
+    rowsForTable = [...filtered].reverse(); // Month -> show all trades for that month
+  }
+  const rowsHtml = rowsForTable.map(t=>{
     const cls = t.cls==='win'?'ok':'bad';
     return `
       <tr>
@@ -269,17 +362,77 @@ function render(){
     </table>`;
 }
 
+/* ---------- Data loading (hybrid) ---------- */
+async function fetchText(url){
+  const res = await fetch(url, {cache:'no-store'});
+  if(!res.ok) throw new Error('Fetch failed: '+res.status);
+  return res.text();
+}
+
+async function loadFromOneDriveIfSet(){
+  const url = localStorage.getItem('onedriveCsvUrl');
+  if(!url) return null;
+  try{
+    const csv = await fetchText(url + (url.includes('?') ? '&' : '?') + 'cb=' + Date.now());
+    sourceStatus.textContent = 'Source: OneDrive CSV';
+    return csv;
+  }catch(e){
+    console.warn('OneDrive fetch failed', e);
+    sourceStatus.textContent = 'Source: default (upload or data.csv)';
+    return null;
+  }
+}
+
+async function loadFromDataCsv(){
+  try{
+    const csv = await fetchText('data.csv?cb=' + Date.now());
+    sourceStatus.textContent = 'Source: data.csv';
+    return csv;
+  }catch(e){
+    return null;
+  }
+}
+
+async function loadFromFile(file){
+  document.getElementById('updated').textContent='Loading…';
+  try{
+    let csvText = '';
+    if (/\.(xlsx|xlsm?|xltx|xltm)$/i.test(file.name)){
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, {type:'array'});
+      const firstSheet = wb.SheetNames[0];
+      csvText = XLSX.utils.sheet_to_csv(wb.Sheets[firstSheet]);
+    } else {
+      csvText = await file.text();
+    }
+    const trades = parseCSV(csvText);
+    if(!trades.length) throw new Error('No valid trades found in file.');
+    ALL_TRADES = trades;
+    document.getElementById('empty').style.display='none';
+    document.getElementById('updated').textContent='Updated (uploaded): '+new Date().toLocaleString();
+    render();
+  }catch(e){
+    console.error(e);
+    document.getElementById('empty').style.display='';
+    document.getElementById('updated').textContent='Failed to parse upload.';
+  }
+}
+
 /* ---------- Init ---------- */
 async function load(){
   document.getElementById('updated').textContent='Loading…';
-  let csv;
-  try{
-    const res = await fetch('data.csv?cb='+Date.now());
-    if(!res.ok) throw new Error('no csv');
-    csv = await res.text();
-  }catch(e){
+  let csv = null;
+
+  // Try OneDrive first (if configured)
+  csv = await loadFromOneDriveIfSet();
+
+  // Fallback to data.csv
+  if(!csv) csv = await loadFromDataCsv();
+
+  if(!csv){
     document.getElementById('empty').style.display='';
     document.getElementById('updated').textContent='';
+    setActiveTabs();
     return;
   }
 
@@ -287,36 +440,28 @@ async function load(){
   if(!trades.length){
     document.getElementById('empty').style.display='';
     document.getElementById('updated').textContent='Updated: '+new Date().toLocaleString();
+    setActiveTabs();
     return;
   }
 
   ALL_TRADES = trades;
+  document.getElementById('empty').style.display='none';
   document.getElementById('updated').textContent='Updated: '+new Date().toLocaleString();
+
+  // Restore a valid month if saved one no longer exists
+  const months = Array.from(new Set(ALL_TRADES.map(t=>t.monthKey))).sort();
+  if (MODE==='month'){
+    if(!ACTIVE_MONTH || !months.includes(ACTIVE_MONTH)){
+      ACTIVE_MONTH = months[months.length-1] || null;
+      localStorage.setItem('active_month', ACTIVE_MONTH || '');
+    }
+  }
+
+  setActiveTabs();
   render();
 }
 
-document.getElementById('allBtn').onclick = ()=>{
-  MODE='all'; ACTIVE_MONTH=null;
-  document.getElementById('allBtn').classList.add('active');
-  document.getElementById('weekBtn').classList.remove('active');
-  document.getElementById('monthTabBtn').classList.remove('active');
-  render();
-};
-document.getElementById('weekBtn').onclick = ()=>{
-  MODE='week'; ACTIVE_MONTH=null;
-  document.getElementById('weekBtn').classList.add('active');
-  document.getElementById('allBtn').classList.remove('active');
-  document.getElementById('monthTabBtn').classList.remove('active');
-  render();
-};
-document.getElementById('monthTabBtn').onclick = ()=>{
-  MODE='month';
-  document.getElementById('monthTabBtn').classList.add('active');
-  document.getElementById('allBtn').classList.remove('active');
-  document.getElementById('weekBtn').classList.remove('active');
-  render();
-};
-
+setActiveTabs();
 load();
 </script>
 </body>
